@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html>
+<head>
+<!-- Load the Paper.js library -->
+<script type="text/javascript" src="paper-full.js"></script>
+<!-- Define inlined PaperScript, associate it with myCanvas -->
+<script type="text/javascript">
+	// Define all global variables
+	window.gv = {
+		boids: [],
+		numBoids: 100,
+		boid_length: 15,
+		boid_base: 8,
+		min_starting_velocity: 0.1,
+		max_starting_velocity: 1,
+		max_velocity: 2,
+
+		max_influence_distance: 200,
+		random_velocity_change: 0.001,
+		random_angle_change: 0.1,
+		random_hue_change: 1,
+
+		max_alignment_distance: 30,
+		min_alignment_distance: 0,
+		max_alignment_angle_change: 0.5,
+		alignment_proportion_change: 0.1,
+
+		min_cohesion_distance: 32,
+		max_cohesion_distance: 40,
+		cohesion_power: function(dist) { return 0.1; },
+
+		min_separation_distance: 0,
+		max_separation_distance: 20,
+		separation_power: function(dist) { return 0.5; },
+
+		min_property_convergence_distance: 0,
+		max_property_convergence_distance: 120,
+		max_hue_change: 0.3,
+		hue_convergence_power: 0.1,
+
+		min_property_divergence_distance: 120,
+		max_property_divergence_distance: 200,
+		hue_divergence_power: 0.003,
+	}
+</script>
+<script type="text/paperscript" canvas="myCanvas">
+
+	function displacement_with_wrap(a, b) {
+		// Returns displacement a-b that is shortest on the toroidal wraparound surface
+		a2 = a + [0, view.size.height];
+		a3 = a + [view.size.width, 0];
+		a4 = a + [view.size.width, view.size.height];
+		abest = [a, a2, a3, a4].reduce(function(val1, val2) {
+			return (val1 - b).length  > (val2 - b).length ? val2 : val1;
+		});
+		return abest - b;
+	}
+
+	function closest_angle_delta(a, b) {
+		a2 = a + 360;
+		a3 = a - 360;
+		abest = [a, a2, a3].reduce(function(val1, val2) {
+			return (Math.abs(val1 - b) < Math.abs(val2 - b)) ? val1 : val2;
+		});
+		return abest - b;
+	}
+
+	function inverse_angle(a) {
+		/* Returns a number that's higher for lower angles. */
+		return 360 - a;
+	}
+
+	function Boid(id) {
+		this.id = id;
+		this.position = Point.random() * view.size;
+		this.velocity = new Point({
+			angle: 360 * Math.random(),
+			length: gv.min_starting_velocity + Math.random() * (gv.max_starting_velocity - gv.min_starting_velocity)
+		});
+		this.length = gv.boid_length;
+		this.base = gv.boid_base;
+
+		this.path = new Path({
+			fillColor: {
+				hue: Math.random() * 360,
+				saturation: 1,
+				brightness: 1,
+			},
+		});
+		//this.path.fillColor._alpha = 0.9;
+
+		// make tip and two points at the back, for isosceles triangle
+		this.path.add(this.position + [this.length/2, 0]);
+		this.path.add(this.position + [-this.length/2, this.base / 2]);
+		this.path.add(this.position + [-this.length/2, -this.base / 2]);
+		this.path.rotate(this.velocity.angle, this.position);
+	}
+
+	Boid.prototype = {
+		step : function() {
+			//console.log(this.position, this.velocity, view.size);
+			// save previous rotation and position
+			lastPosition = this.position;
+			lastAngle = this.velocity.angle;
+
+			// react to all other boids
+			for (iboid = 0; iboid < gv.numBoids; iboid++) {
+				if (gv.boids[iboid] === this) {
+					continue;
+				}
+				this.react(gv.boids[iboid]);
+			}
+
+			// Move according to velocity
+			this.position += this.velocity;
+
+			// Enforce position bounds;
+			this.wrap_position();
+
+			// Randomly modify all properties
+			this.velocity += new Point({
+				angle: Math.random() * 360,
+				length: gv.random_velocity_change
+			});
+			this.velocity.angle += (Math.random() - 0.5) * gv.random_angle_change;
+			this.path.fillColor.hue += (Math.random() - 0.5) * gv.random_hue_change;
+
+			// Enforce bounds on properties
+			if (this.velocity.length > gv.max_velocity) {
+				this.velocity.length = gv.max_velocity;
+			}
+			if (this.velocity.angle > 360) {
+				this.velocity.angle -= 360;
+			}
+			if (this.velocity.angle < 0) {
+				this.velocity.angle += 360;
+			}
+			if (this.path.fillColor.hue > 360) {
+				this.path.fillColor.hue -= 360;
+			}
+			if (this.path.fillColor.hue < 0) {
+				this.path.fillColor.hue += 360;
+			}
+
+			// Update path using location and angle deltas
+			angleChange = this.velocity.angle - lastAngle;
+			positionChange = this.position - lastPosition;
+			for (var iseg = 0; iseg < 3; iseg++) {
+				this.path.segments[iseg].point += positionChange;
+			}
+			this.path.rotate(angleChange, this.position);
+		},
+
+		wrap_position : function() {
+			if (this.position.x > view.size.width) {
+				this.position.x = 0;
+			}
+			if (this.position.y > view.size.height) {
+				this.position.y = 0;
+			}
+			if (this.position.x < 0) {
+				this.position.x = view.size.width;
+			}
+			if (this.position.y < 0) {
+				this.position.y = view.size.height;
+			}
+		},
+
+		react : function(otherboid) {
+			delta = displacement_with_wrap(otherboid.position, this.position);
+			//delta = otherboid.position - this.position;
+			if (delta.length > gv.max_influence_distance) {
+				return;
+			}
+
+			this.neighbor_alignment(otherboid, delta);
+			this.neighbor_cohesion(otherboid, delta);
+			this.neighbor_separation(otherboid, delta);
+			this.neighbor_property_converge(otherboid, delta);
+			this.neighbor_property_diverge(otherboid, delta);
+		},
+
+		neighbor_cohesion : function(otherboid, delta) {
+			// go closer to the center of mass of nearby boids
+			if ((delta.length < gv.min_cohesion_distance)
+					|| (delta.length > gv.max_cohesion_distance)) {
+				return;
+			}
+			this.velocity += new Point({angle: delta.angle, length: gv.cohesion_power(delta.length)});
+		},
+
+		neighbor_separation : function(otherboid, delta) {
+			if ((delta.length < gv.min_separation_distance)
+					|| (delta.length > gv.max_separation_distance)) {
+				return;
+			}
+			this.velocity += new Point({angle: delta.angle - 180, length: gv.separation_power(delta.length)});
+		},
+
+		neighbor_alignment : function(otherboid, delta) {
+			// apply alignment - find angle difference, try to approach it
+			if ((delta.length < gv.min_alignment_distance)
+					|| (delta.length > gv.max_alignment_distance)) {
+				return;
+			}
+			angle_delta = closest_angle_delta(otherboid.velocity.angle, this.velocity.angle);
+			if (angle_delta > 0) {
+				this.velocity.angle += Math.min(angle_delta * gv.alignment_proportion_change, gv.max_alignment_angle_change);
+			}
+			if (angle_delta < 0) {
+				this.velocity.angle -= Math.min(-angle_delta * gv.alignment_proportion_change, gv.max_alignment_angle_change);
+			}
+		},
+
+		neighbor_property_converge : function(otherboid, delta) {
+			if ((delta.length < gv.min_property_convergence_distance)
+					|| (delta.length > gv.max_property_convergence_distance)) {
+				return;
+			}
+			//console.log(this.path.fillColor.hue);
+			hue_delta = closest_angle_delta(otherboid.path.fillColor.hue, this.path.fillColor.hue);
+			if (hue_delta > 0) {
+				this.path.fillColor.hue += Math.min(hue_delta * gv.hue_convergence_power, gv.max_hue_change);
+			}
+			if (hue_delta < 0) {
+				this.path.fillColor.hue -= Math.min(-hue_delta * gv.hue_convergence_power, gv.max_hue_change);
+			}
+		},
+
+		neighbor_property_diverge : function(otherboid, delta) {
+			if ((delta.length < gv.min_property_divergence_distance)
+					|| (delta.length > gv.max_property_divergence_distance)) {
+				return;
+			}
+			//console.log(this.path.fillColor.hue);
+			hue_delta = closest_angle_delta(otherboid.path.fillColor.hue, this.path.fillColor.hue);
+			if (hue_delta > 0) {
+				this.path.fillColor.hue -= Math.min(inverse_angle(hue_delta) * gv.hue_divergence_power, gv.max_hue_change);
+			}
+			if (hue_delta < 0) {
+				this.path.fillColor.hue += Math.min(inverse_angle(-hue_delta) * gv.hue_divergence_power, gv.max_hue_change);
+			}
+		},
+	}
+
+
+	for (var i = 0; i < gv.numBoids; i++) {
+		gv.boids.push(new Boid(i));
+	}
+
+	function onFrame() {
+		for (var iboid = 0; iboid < gv.numBoids; iboid++) {
+			gv.boids[iboid].step();
+		}
+	}
+</script>
+<script type="text/javascript">
+	
+</script>
+
+
+</head>
+<body>
+	<canvas id="myCanvas" style="border: 1px solid black; width: 800px; height: 800px;" resize></canvas>
+</body>
+</html>
